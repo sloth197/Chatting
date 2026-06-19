@@ -1,0 +1,11 @@
+﻿  ChatServerDlg.cpp
+C:\million\Chatting\ChatServer\ChatServerDlg.cpp(176,1): error C2447: '{': 함수 헤더가 없습니다. 이전 스타일의 형식 목록입니까?
+  (소스 파일 '/ChatServerDlg.cpp'을(를) 컴파일하는 중)
+  
+C:\million\Chatting\ChatServer\ChatServerDlg.cpp(214,13): error C2660: 'recv': 함수는 5개의 인수를 사용하지 않습니다.
+  (소스 파일 '/ChatServerDlg.cpp'을(를) 컴파일하는 중)
+      C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\um\WinSock2.h(2010,1):
+      'recv' 선언을 참조하십시오.
+      C:\million\Chatting\ChatServer\ChatServerDlg.cpp(214,13):
+      인수 목록 '(SOCKET, char [1024], size_t, int, int)'을(를) 일치시키는 동안
+  
