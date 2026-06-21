@@ -27,8 +27,18 @@ protected:
 
 	// 생성된 메시지 맵 함수
 	virtual BOOL OnInitDialog();
+	virtual void OnOK();
+	virtual void OnCancel();
 	afx_msg void OnSysCommand(UINT nID, LPARAM lParam);
 	afx_msg void OnPaint();
 	afx_msg HCURSOR OnQueryDragIcon();
+	afx_msg void OnBnClickedButtonConnect();
+	afx_msg void OnBnClickedButtonSend();
+	afx_msg void OnDestroy();
+	afx_msg LRESULT OnAddLog(WPARAM wParam, LPARAM lParam);
 	DECLARE_MESSAGE_MAP()
+
+private:
+	void AddLog(const CString& text);
+	void Disconnect();
 };

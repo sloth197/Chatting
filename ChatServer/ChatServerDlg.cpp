@@ -8,23 +8,81 @@
 #include "ChatServerDlg.h"
 #include "afxdialogex.h"
 
-#include <iostream>
-#include <winsock2.h>
+#include <string>
+
 #pragma comment(lib, "ws2_32.lib")
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
 #endif
 
+const UINT WM_ADD_LOG = WM_USER + 100;
+
 //서버 및 클라이언트 소켓
 SOCKET g_serverSock = INVALID_SOCKET;
 SOCKET g_client1 = INVALID_SOCKET;
 SOCKET g_client2 = INVALID_SOCKET;
+HWND g_hServerWnd = NULL;
+bool g_serverStarted = false;
+bool g_wsaStarted = false;
 
 //Thread 함수 선언
 UINT ServerThread(LPVOID pParam);
 UINT Client1ToClient2Thread(LPVOID pParam);
 UINT Client2ToClient1Thread(LPVOID pParam);
+
+std::string CStringToUtf8(const CString& text)
+{
+	int byteCount = WideCharToMultiByte(CP_UTF8, 0, text.GetString(), -1, NULL, 0, NULL, NULL);
+	if (byteCount <= 1)
+	{
+		return std::string();
+	}
+
+	std::string result(byteCount, '\0');
+	WideCharToMultiByte(CP_UTF8, 0, text.GetString(), -1, &result[0], byteCount, NULL, NULL);
+	result.resize(byteCount - 1);
+	return result;
+}
+
+CString Utf8ToCString(const char* data, int length)
+{
+	CString result;
+	int charCount = MultiByteToWideChar(CP_UTF8, 0, data, length, NULL, 0);
+	if (charCount <= 0)
+	{
+		return result;
+	}
+
+	wchar_t* buffer = result.GetBuffer(charCount);
+	MultiByteToWideChar(CP_UTF8, 0, data, length, buffer, charCount);
+	result.ReleaseBuffer(charCount);
+	return result;
+}
+
+void PostServerLog(const CString& text)
+{
+	if (::IsWindow(g_hServerWnd))
+	{
+		::PostMessage(g_hServerWnd, WM_ADD_LOG, 0, (LPARAM)new CString(text));
+	}
+}
+
+bool SendToClient(SOCKET clientSock, const CString& message)
+{
+	if (clientSock == INVALID_SOCKET)
+	{
+		return false;
+	}
+
+	std::string sendData = CStringToUtf8(message);
+	if (sendData.empty())
+	{
+		return false;
+	}
+
+	return send(clientSock, sendData.c_str(), (int)sendData.size(), 0) != SOCKET_ERROR;
+}
 
 // 응용 프로그램 정보에 사용되는 CAboutDlg 대화 상자입니다.
 class CAboutDlg : public CDialogEx
@@ -76,6 +134,10 @@ BEGIN_MESSAGE_MAP(CChatServerDlg, CDialogEx)
 	ON_WM_SYSCOMMAND()
 	ON_WM_PAINT()
 	ON_WM_QUERYDRAGICON()
+	ON_BN_CLICKED(IDC_BUTTON_START, &CChatServerDlg::OnBnClickedButtonStart)
+	ON_BN_CLICKED(IDC_BUTTON_SEND, &CChatServerDlg::OnBnClickedButtonSend)
+	ON_WM_DESTROY()
+	ON_MESSAGE(WM_ADD_LOG, &CChatServerDlg::OnAddLog)
 END_MESSAGE_MAP()
 
 
@@ -111,13 +173,8 @@ BOOL CChatServerDlg::OnInitDialog()
 	SetIcon(m_hIcon, FALSE);		// 작은 아이콘을 설정합니다.
 
 	// TODO: 여기에 추가 초기화 작업을 추가합니다.
-	//콘솔 창 생성
-	AllocConsole();
-	FILE* fp;
-	freopen_s(&fp, "CONTOUT$", "w", stdout);
-	freopen_s(&fp, "CONIN$", "r", stdin);
-	std::cout << "Server Start" << std::endl;
-	AfxBeginThread(ServerThread, NULL);
+	g_hServerWnd = m_hWnd;
+	AddLog(_T("[서버 시작] 버튼을 누르면 4000번 포트에서 대기합니다."));
 	return TRUE;  // 포커스를 컨트롤에 설정하지 않으면 TRUE를 반환합니다.
 }
 
@@ -171,31 +228,70 @@ HCURSOR CChatServerDlg::OnQueryDragIcon()
 }
 
 //서버 실행
-UINT ServerThread(LPVOID pParam);
+UINT ServerThread(LPVOID pParam)
 {
-	WSDATA wsa;
-	WSAStartup(MAKEWORD(2, 2), &wsa);
+	WSADATA wsa;
+	if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
+	{
+		PostServerLog(_T("WSAStartup 실패"));
+		g_serverStarted = false;
+		return 0;
+	}
+	g_wsaStarted = true;
+
 	g_serverSock = socket(AF_INET, SOCK_STREAM, 0);
+	if (g_serverSock == INVALID_SOCKET)
+	{
+		PostServerLog(_T("서버 소켓 생성 실패"));
+		g_serverStarted = false;
+		return 0;
+	}
+
+	BOOL reuseAddr = TRUE;
+	setsockopt(g_serverSock, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuseAddr, sizeof(reuseAddr));
 
 	//서버 주소 설정
 	SOCKADDR_IN serverAddr = {};
 	serverAddr.sin_family = AF_INET;
 	serverAddr.sin_port = htons(4000);
-	serverAddr.sinaddr.s_addr = htonl(INADDR_ANY);
+	serverAddr.sin_addr.s_addr = htonl(INADDR_ANY);
 
 	//IP,PORT -> 서버 소켓 연결
-	bind(g_serverSock, (SOCKADDR*)&serverAddr, sizeof(serverAddr));
-	listen(g_serverSock, 2);
+	if (bind(g_serverSock, (SOCKADDR*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR)
+	{
+		PostServerLog(_T("bind 실패: 4000번 포트를 사용할 수 없습니다."));
+		g_serverStarted = false;
+		return 0;
+	}
 
-	std::cout << "Client1 Connect Waiting" << std::endl;
+	if (listen(g_serverSock, 2) == SOCKET_ERROR)
+	{
+		PostServerLog(_T("listen 실패"));
+		g_serverStarted = false;
+		return 0;
+	}
+
+	PostServerLog(_T("Client1 접속 대기 중..."));
 	g_client1 = accept(g_serverSock, NULL, NULL);
-	std::cout << "Client1 Connect Success" << std::endl;
+	if (g_client1 == INVALID_SOCKET)
+	{
+		PostServerLog(_T("Client1 accept 실패"));
+		g_serverStarted = false;
+		return 0;
+	}
+	PostServerLog(_T("Client1 접속 성공"));
 
-	std::cout << "Client2 Connect Waiting" << std::endl;
+	PostServerLog(_T("Client2 접속 대기 중..."));
 	g_client2 = accept(g_serverSock, NULL, NULL);
-	std::cout << "Client2 Connect Success" << std::endl;
+	if (g_client2 == INVALID_SOCKET)
+	{
+		PostServerLog(_T("Client2 accept 실패"));
+		g_serverStarted = false;
+		return 0;
+	}
+	PostServerLog(_T("Client2 접속 성공"));
 
-	std::cout << "Chatting Start" << std::endl;
+	PostServerLog(_T("채팅 시작"));
 
 	//Client1 -> Client2
 	AfxBeginThread(Client1ToClient2Thread, NULL);
@@ -210,16 +306,166 @@ UINT Client1ToClient2Thread(LPVOID pParam)
 {
 	char buffer[1024];
 
-	while (true)
+	while (g_serverStarted)
 	{
-		int len = recv(g_client1, buffer, sizeof(buffer), -1, 0);
-		if (len < 0)
+		int len = recv(g_client1, buffer, sizeof(buffer), 0);
+		if (len <= 0)
 		{
 			break;
 		}
-		buffer[len] = '\0';
-		std::cout << "Client1 -> Client2 : " << buffer << std::endl;
-		send(g_client1, buffer, len, 0);
+
+		CString message = Utf8ToCString(buffer, len);
+		CString log;
+		log.Format(_T("Client1 -> Client2: %s"), message.GetString());
+		PostServerLog(log);
+
+		SendToClient(g_client2, _T("[Client1] ") + message);
+	}
+	PostServerLog(_T("Client1 연결 종료"));
+	return 0;
+}
+
+//Client2 Message -> Client1
+UINT Client2ToClient1Thread(LPVOID pParam)
+{
+	char buffer[1024];
+
+	while (g_serverStarted)
+	{
+		int len = recv(g_client2, buffer, sizeof(buffer), 0);
+		if (len <= 0)
+		{
+			break;
+		}
+
+		CString message = Utf8ToCString(buffer, len);
+		CString log;
+		log.Format(_T("Client2 -> Client1: %s"), message.GetString());
+		PostServerLog(log);
+
+		SendToClient(g_client1, _T("[Client2] ") + message);
+	}
+	PostServerLog(_T("Client2 연결 종료"));
+	return 0;
+}
+
+void CChatServerDlg::OnBnClickedButtonStart()
+{
+	if (g_serverStarted)
+	{
+		AddLog(_T("서버가 이미 실행 중입니다."));
+		return;
+	}
+
+	g_serverStarted = true;
+	GetDlgItem(IDC_BUTTON_START)->EnableWindow(FALSE);
+	AddLog(_T("서버 시작 중..."));
+	AfxBeginThread(ServerThread, NULL);
+}
+
+void CChatServerDlg::OnBnClickedButtonSend()
+{
+	CString message;
+	GetDlgItemText(IDC_EDIT_MESSAGE, message);
+	message.Trim();
+
+	if (message.IsEmpty())
+	{
+		return;
+	}
+
+	CString sendMessage = _T("[Server] ") + message;
+	bool sent = false;
+	sent = SendToClient(g_client1, sendMessage) || sent;
+	sent = SendToClient(g_client2, sendMessage) || sent;
+
+	if (sent)
+	{
+		AddLog(_T("Server -> Client: ") + message);
+		SetDlgItemText(IDC_EDIT_MESSAGE, _T(""));
+	}
+	else
+	{
+		AddLog(_T("연결된 클라이언트가 없습니다."));
+	}
+}
+
+void CChatServerDlg::OnOK()
+{
+	OnBnClickedButtonSend();
+}
+
+void CChatServerDlg::OnCancel()
+{
+	StopServer();
+	CDialogEx::OnCancel();
+}
+
+void CChatServerDlg::OnDestroy()
+{
+	StopServer();
+	CDialogEx::OnDestroy();
+}
+
+LRESULT CChatServerDlg::OnAddLog(WPARAM wParam, LPARAM lParam)
+{
+	CString* text = (CString*)lParam;
+	if (text != NULL)
+	{
+		AddLog(*text);
+		delete text;
 	}
 	return 0;
+}
+
+void CChatServerDlg::AddLog(const CString& text)
+{
+	CEdit* logEdit = (CEdit*)GetDlgItem(IDC_EDIT_LOG);
+	if (logEdit == NULL)
+	{
+		return;
+	}
+
+	CString oldText;
+	logEdit->GetWindowText(oldText);
+	oldText += text;
+	oldText += _T("\r\n");
+	logEdit->SetWindowText(oldText);
+
+	int length = logEdit->GetWindowTextLength();
+	logEdit->SetSel(length, length);
+}
+
+void CChatServerDlg::StopServer()
+{
+	g_serverStarted = false;
+
+	if (g_client1 != INVALID_SOCKET)
+	{
+		closesocket(g_client1);
+		g_client1 = INVALID_SOCKET;
+	}
+
+	if (g_client2 != INVALID_SOCKET)
+	{
+		closesocket(g_client2);
+		g_client2 = INVALID_SOCKET;
+	}
+
+	if (g_serverSock != INVALID_SOCKET)
+	{
+		closesocket(g_serverSock);
+		g_serverSock = INVALID_SOCKET;
+	}
+
+	if (g_wsaStarted)
+	{
+		WSACleanup();
+		g_wsaStarted = false;
+	}
+
+	if (::IsWindow(m_hWnd) && GetDlgItem(IDC_BUTTON_START) != NULL)
+	{
+		GetDlgItem(IDC_BUTTON_START)->EnableWindow(TRUE);
+	}
 }
